@@ -402,6 +402,71 @@ func (s *OffsetTrkSuite) TestMaxOfferTimeout(c *C) {
 	}
 }
 
+// Exhausted offers are skipped by NextRetry, keep being reported by
+// ExhaustedOffers and remain an open gap in the committed range until they
+// are acknowledged (e.g. by a dead letter receipt).
+func (s *OffsetTrkSuite) TestExhausted(c *C) {
+	ot := New(s.ns, offsetmgr.Offset{Val: 300}, 5*time.Second)
+	for _, m := range []consumer.Message{msg(300), msg(301), msg(302)} {
+		ot.OnOffered(m)
+	}
+	// Make all offers immediately overdue for a retry.
+	past := time.Now().Add(-time.Second)
+	for i := range ot.offers {
+		ot.offers[i].deadline = past
+	}
+
+	// Offset 300 gets its first (and last) retry, then is marked exhausted.
+	m, retryNo, ok := ot.nextRetry(time.Now())
+	c.Assert(ok, Equals, true)
+	c.Assert(m.Offset, Equals, int64(300))
+	c.Assert(retryNo, Equals, 1)
+	ot.MarkExhausted(300)
+	// Marking a non-existing offset is a no-op.
+	ot.MarkExhausted(399)
+
+	// NextRetry skips the exhausted offer and keeps its retry number frozen.
+	m, retryNo, ok = ot.nextRetry(time.Now())
+	c.Assert(ok, Equals, true)
+	c.Assert(m.Offset, Equals, int64(301))
+	c.Assert(retryNo, Equals, 1)
+	m, retryNo, ok = ot.nextRetry(time.Now())
+	c.Assert(ok, Equals, true)
+	c.Assert(m.Offset, Equals, int64(302))
+
+	// Only 300 is reported as exhausted, carrying its frozen retry number.
+	exhausted := ot.ExhaustedOffers()
+	c.Assert(exhausted, HasLen, 1)
+	c.Assert(exhausted[0].Msg.Offset, Equals, int64(300))
+	c.Assert(exhausted[0].RetryNo, Equals, 1)
+
+	// No matter how often NextRetry runs before the other offers expire, the
+	// exhausted offer is not re-offered and its deadline is not bumped
+	// anymore (it was bumped once when the last retry attempt was returned).
+	frozenDeadline := ot.offers[0].deadline
+	c.Assert(frozenDeadline.After(past), Equals, true)
+	_, _, ok = ot.nextRetry(time.Now())
+	c.Assert(ok, Equals, false)
+	c.Assert(ot.offers[0].deadline, Equals, frozenDeadline)
+	// Its gap keeps the submitted offset from advancing even though 301/302
+	// are eventually acknowledged.
+	ot.OnAcked(301)
+	submitted, offerCount := ot.OnAcked(302)
+	c.Assert(offerCount, Equals, 1)
+	c.Assert(submitted.Val, Equals, int64(300))
+	c.Assert(SparseAcks2Str(submitted), Equals, "1-3")
+
+	// An exhausted offer with an expired deadline does not delay shutdown.
+	c.Assert(ot.shouldWait4Ack(time.Now().Add(time.Hour)), Equals, time.Duration(0))
+
+	// Acknowledging it (dead letter receipt) closes the gap contiguously.
+	submitted, offerCount = ot.OnAcked(300)
+	c.Assert(offerCount, Equals, 0)
+	c.Assert(submitted.Val, Equals, int64(303))
+	c.Assert(SparseAcks2Str(submitted), Equals, "")
+	c.Assert(ot.ExhaustedOffers(), HasLen, 0)
+}
+
 func msg(offset int64) consumer.Message {
 	return consumer.Message{ConsumerMessage: sarama.ConsumerMessage{Offset: offset}}
 }

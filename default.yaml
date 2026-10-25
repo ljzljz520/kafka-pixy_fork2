@@ -181,6 +181,23 @@ proxies:
       # parameter to -1.
       max_retries: -1
 
+      # Optional name of a topic in the same Kafka cluster that messages
+      # exhausted of retries are copied to instead of being discarded. It is
+      # empty (disabled) by default and only takes effect with a finite
+      # max_retries. The original key/value/headers are preserved verbatim
+      # (duplicate headers included) and augmented with `x-kafka-pixy-dlq-*`
+      # headers carrying the source cluster, group, topic, partition, offset,
+      # timestamps and a stable identity derived from the source location.
+      #
+      # The source offset is acknowledged only after the broker durably
+      # acknowledges the dead letter copy, so no record is ever skipped
+      # without a replica; a crash between the successful copy and the source
+      # offset commit may copy the same identity twice. A failed or
+      # unacknowledged copy keeps the source gap open and is retried with
+      # consumer.retry_backoff. Must not equal a consumed source topic and
+      # requires Kafka 0.11.0 or newer.
+      # dead_letter_topic: ""
+
       # How frequently to commit offsets to Kafka.
       offsets_commit_interval: 500ms
 

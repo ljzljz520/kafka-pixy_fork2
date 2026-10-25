@@ -75,7 +75,7 @@ func (s *PartitionCsmSuite) TestOldestOffset(c *C) {
 	s.kh.SetOffsets(group, topic, []offsetmgr.Offset{{Val: sarama.OffsetOldest, Meta: ""}})
 	offsets := s.kh.GetCommittedOffsets(group, topic)
 	c.Assert(offsets[partition], Equals, offsetmgr.Offset{Val: sarama.OffsetOldest, Meta: ""})
-	pc := Spawn(s.ns, group, topic, partition, s.cfg, s.groupMember, s.msgFetcherF, s.offsetMgrF)
+	pc := Spawn(s.ns, group, topic, partition, s.cfg, s.groupMember, s.msgFetcherF, s.offsetMgrF, "test", nil)
 
 	// When
 	<-pc.Messages()
@@ -95,7 +95,7 @@ func (s *PartitionCsmSuite) TestInitialOffsetTooLarge(c *C) {
 	newestOffsets := s.kh.GetNewestOffsets(topic)
 	log.Infof("*** test.1 offsets: oldest=%v, newest=%v", oldestOffsets, newestOffsets)
 	s.kh.SetOffsets(group, topic, []offsetmgr.Offset{{Val: newestOffsets[partition] + 3}})
-	pc := Spawn(s.ns, group, topic, partition, s.cfg, s.groupMember, s.msgFetcherF, s.offsetMgrF)
+	pc := Spawn(s.ns, group, topic, partition, s.cfg, s.groupMember, s.msgFetcherF, s.offsetMgrF, "test", nil)
 	defer pc.Stop()
 	// Wait for the partition consumer to initialize.
 	initialOffset := <-s.initOffsetCh
@@ -117,7 +117,7 @@ func (s *PartitionCsmSuite) TestInitialOffsetTooLarge(c *C) {
 // previous one is reported as offered.
 func (s *PartitionCsmSuite) TestMustBeOfferedToProceed(c *C) {
 	s.kh.SetOffsetValues(group, topic, s.kh.GetOldestOffsets(topic))
-	pc := Spawn(s.ns, group, topic, partition, s.cfg, s.groupMember, s.msgFetcherF, s.offsetMgrF)
+	pc := Spawn(s.ns, group, topic, partition, s.cfg, s.groupMember, s.msgFetcherF, s.offsetMgrF, "test", nil)
 	defer pc.Stop()
 
 	// When
@@ -160,7 +160,7 @@ func (s *PartitionCsmSuite) TestSparseAckedNotRead(c *C) {
 	c.Assert(offsettrk.SparseAcks2Str(initOffset), Equals, "1-4,6-7")
 	s.kh.SetOffsets(group, topic, []offsetmgr.Offset{initOffset})
 
-	pc := Spawn(s.ns, group, topic, partition, s.cfg, s.groupMember, s.msgFetcherF, s.offsetMgrF)
+	pc := Spawn(s.ns, group, topic, partition, s.cfg, s.groupMember, s.msgFetcherF, s.offsetMgrF, "test", nil)
 	defer pc.Stop()
 
 	// When/Then: only messages that has not been acked previously are returned.
@@ -182,7 +182,7 @@ func (s *PartitionCsmSuite) TestSparseAckedNotRead(c *C) {
 // Messages() channel is ignored.
 func (s *PartitionCsmSuite) TestOfferInvalid(c *C) {
 	s.kh.SetOffsetValues(group, topic, s.kh.GetOldestOffsets(topic))
-	pc := Spawn(s.ns, group, topic, partition, s.cfg, s.groupMember, s.msgFetcherF, s.offsetMgrF)
+	pc := Spawn(s.ns, group, topic, partition, s.cfg, s.groupMember, s.msgFetcherF, s.offsetMgrF, "test", nil)
 	defer pc.Stop()
 
 	msg, ok := <-pc.Messages()
@@ -206,7 +206,7 @@ func (s *PartitionCsmSuite) TestOfferedTooMany(c *C) {
 	s.cfg.Consumer.AckTimeout = 500 * time.Millisecond
 	s.cfg.Consumer.MaxPendingMessages = 3
 	s.kh.SetOffsetValues(group, topic, s.kh.GetOldestOffsets(topic))
-	pc := Spawn(s.ns, group, topic, partition, s.cfg, s.groupMember, s.msgFetcherF, s.offsetMgrF)
+	pc := Spawn(s.ns, group, topic, partition, s.cfg, s.groupMember, s.msgFetcherF, s.offsetMgrF, "test", nil)
 	defer pc.Stop()
 	var msg consumer.Message
 
@@ -261,7 +261,7 @@ func (s *PartitionCsmSuite) TestSparseAckedCommitted(c *C) {
 	}
 	s.kh.SetOffsetValues(group, topic, offsetsBefore)
 
-	pc := Spawn(s.ns, group, topic, partition, s.cfg, s.groupMember, s.msgFetcherF, s.offsetMgrF)
+	pc := Spawn(s.ns, group, topic, partition, s.cfg, s.groupMember, s.msgFetcherF, s.offsetMgrF, "test", nil)
 
 	// When
 	for _, shouldAck := range acks {
@@ -287,7 +287,7 @@ func (s *PartitionCsmSuite) TestSparseAckedAfterStop(c *C) {
 	s.cfg.Consumer.AckTimeout = 300 * time.Millisecond
 	s.kh.SetOffsetValues(group, topic, offsetsBefore)
 
-	pc := Spawn(s.ns, group, topic, partition, s.cfg, s.groupMember, s.msgFetcherF, s.offsetMgrF)
+	pc := Spawn(s.ns, group, topic, partition, s.cfg, s.groupMember, s.msgFetcherF, s.offsetMgrF, "test", nil)
 
 	var messages []consumer.Message
 	for i := 0; i < 10; i++ {
@@ -333,7 +333,7 @@ func (s *PartitionCsmSuite) TestZeroRetries(c *C) {
 	s.cfg.Consumer.MaxRetries = 0
 	s.kh.SetOffsetValues(group, topic, offsetsBefore)
 
-	pc := Spawn(s.ns, group, topic, partition, s.cfg, s.groupMember, s.msgFetcherF, s.offsetMgrF)
+	pc := Spawn(s.ns, group, topic, partition, s.cfg, s.groupMember, s.msgFetcherF, s.offsetMgrF, "test", nil)
 
 	msg0 := <-pc.Messages()
 	log.Infof("*** First: offset=%v", msg0.Offset)
@@ -364,7 +364,7 @@ func (s *PartitionCsmSuite) TestIndefiniteRetries(c *C) {
 	s.cfg.Consumer.MaxRetries = -1
 	s.kh.SetOffsetValues(group, topic, offsetsBefore)
 
-	pc := Spawn(s.ns, group, topic, partition, s.cfg, s.groupMember, s.msgFetcherF, s.offsetMgrF)
+	pc := Spawn(s.ns, group, topic, partition, s.cfg, s.groupMember, s.msgFetcherF, s.offsetMgrF, "test", nil)
 
 	msg0 := <-pc.Messages()
 	sendEvOffered(msg0)
@@ -401,7 +401,7 @@ func (s *PartitionCsmSuite) TestMaxRetriesReached(c *C) {
 	s.cfg.Consumer.MaxRetries = 3
 	s.kh.SetOffsetValues(group, topic, offsetsBefore)
 
-	pc := Spawn(s.ns, group, topic, partition, s.cfg, s.groupMember, s.msgFetcherF, s.offsetMgrF)
+	pc := Spawn(s.ns, group, topic, partition, s.cfg, s.groupMember, s.msgFetcherF, s.offsetMgrF, "test", nil)
 
 	var messages []consumer.Message
 	for i := 0; i < 3; i++ {
@@ -458,7 +458,7 @@ func (s *PartitionCsmSuite) TestSeveralMessageReties(c *C) {
 	s.cfg.Consumer.AckTimeout = 100 * time.Millisecond
 	s.kh.SetOffsetValues(group, topic, offsetsBefore)
 
-	pc := Spawn(s.ns, group, topic, partition, s.cfg, s.groupMember, s.msgFetcherF, s.offsetMgrF)
+	pc := Spawn(s.ns, group, topic, partition, s.cfg, s.groupMember, s.msgFetcherF, s.offsetMgrF, "test", nil)
 	defer pc.Stop()
 
 	// Read and confirm offered several messages, but do not ack them.
@@ -489,7 +489,7 @@ func (s *PartitionCsmSuite) TestRetryNoMoreMessages(c *C) {
 	s.cfg.Consumer.MaxRetries = 3
 	s.kh.SetOffsets(group, topic, []offsetmgr.Offset{{Val: offsetBefore}})
 
-	pc := Spawn(s.ns, group, topic, partition, s.cfg, s.groupMember, s.msgFetcherF, s.offsetMgrF)
+	pc := Spawn(s.ns, group, topic, partition, s.cfg, s.groupMember, s.msgFetcherF, s.offsetMgrF, "test", nil)
 
 	// Read and confirm offer of 4 messages
 	var messages []consumer.Message
@@ -553,7 +553,7 @@ func (s *PartitionCsmSuite) TestFetcherDeath(c *C) {
 	msgFetcherF := msgfetcher.SpawnFactory(s.ns, s.cfg, kafkaClt)
 	defer msgFetcherF.Stop()
 
-	pc := Spawn(s.ns, group, topic, partition, s.cfg, s.groupMember, msgFetcherF, s.offsetMgrF)
+	pc := Spawn(s.ns, group, topic, partition, s.cfg, s.groupMember, msgFetcherF, s.offsetMgrF, "test", nil)
 	defer pc.Stop()
 
 	// When/Then

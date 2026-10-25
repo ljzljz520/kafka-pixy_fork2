@@ -10,6 +10,7 @@ import (
 	"github.com/mailgun/kafka-pixy/actor"
 	"github.com/mailgun/kafka-pixy/config"
 	"github.com/mailgun/kafka-pixy/consumer"
+	"github.com/mailgun/kafka-pixy/consumer/deadletter"
 	"github.com/mailgun/kafka-pixy/consumer/dispatcher"
 	"github.com/mailgun/kafka-pixy/consumer/msgfetcher"
 	"github.com/mailgun/kafka-pixy/consumer/multiplexer"
@@ -30,12 +31,14 @@ import (
 type T struct {
 	actDesc     *actor.Descriptor
 	cfg         *config.Proxy
+	cluster     string
 	group       string
 	dispatcher  *dispatcher.T
 	kafkaClt    sarama.Client
 	zkConn      *zk.Conn
 	msgFetcherF msgfetcher.Factory
 	offsetMgrF  offsetmgr.Factory
+	dlqProducer deadletter.Producer
 	subscriber  *subscriber.T
 	topicCsmCh  chan *topiccsm.T
 	wg          sync.WaitGroup
@@ -46,6 +49,7 @@ type T struct {
 
 func Spawn(parentActDesc *actor.Descriptor, childSpec dispatcher.ChildSpec,
 	cfg *config.Proxy, kafkaClt sarama.Client, zkConn *zk.Conn, offsetMgrF offsetmgr.Factory,
+	cluster string, dlqProducer deadletter.Producer,
 ) *T {
 	group := string(childSpec.Key())
 	actDesc := parentActDesc.NewChild(fmt.Sprintf("%s", group))
@@ -53,10 +57,12 @@ func Spawn(parentActDesc *actor.Descriptor, childSpec dispatcher.ChildSpec,
 	gc := &T{
 		actDesc:      actDesc,
 		cfg:          cfg,
+		cluster:      cluster,
 		group:        group,
 		kafkaClt:     kafkaClt,
 		zkConn:       zkConn,
 		offsetMgrF:   offsetMgrF,
+		dlqProducer:  dlqProducer,
 		multiplexers: make(map[string]*multiplexer.T),
 		topicCsmCh:   make(chan *topiccsm.T, cfg.Consumer.ChannelBufferSize),
 	}
@@ -229,7 +235,7 @@ func (gc *T) rebalance(actDesc *actor.Descriptor, topicConsumers map[string]*top
 		topic := topic
 		spawnInFn := func(partition int32) multiplexer.In {
 			return partitioncsm.Spawn(gc.actDesc, gc.group, topic, partition,
-				gc.cfg, gc.subscriber, gc.msgFetcherF, gc.offsetMgrF)
+				gc.cfg, gc.subscriber, gc.msgFetcherF, gc.offsetMgrF, gc.cluster, gc.dlqProducer)
 		}
 		mux = multiplexer.New(gc.actDesc, spawnInFn)
 		gc.rewireMuxAsync(topic, &wg, mux, tc, assignedTopicPartitions)

@@ -244,6 +244,20 @@ type Proxy struct {
 		// parameter to -1.
 		MaxRetries int `yaml:"max_retries"`
 
+		// DeadLetterTopic is an optional name of a topic in the same Kafka
+		// cluster that messages exhausted of retries are produced to instead
+		// of being silently discarded. It is empty by default, in which case
+		// exhausted messages are acknowledged and dropped. The option only
+		// takes effect when MaxRetries is non-negative; with MaxRetries=-1
+		// messages are retried indefinitely. The source record is only
+		// acknowledged after the broker durably acknowledges its dead letter
+		// copy, so a crash in between can result in the same source record
+		// being copied more than once (copies carry a stable identity header
+		// for duplicate correlation), but a record is never skipped without a
+		// durable replica. Configuring it to the same name as a consumed
+		// source topic is invalid. Kafka 0.11.0 or newer is required.
+		DeadLetterTopic string `yaml:"dead_letter_topic"`
+
 		// How frequently to commit offsets to Kafka.
 		OffsetsCommitInterval time.Duration `yaml:"offsets_commit_interval"`
 
@@ -579,6 +593,10 @@ func (p *Proxy) validate() error {
 		return errors.New("consumer.max_pending_messages must be > 0")
 	case p.Consumer.MaxRetries < -1:
 		return errors.New("consumer.max_retries must be >= -1")
+	case p.Consumer.DeadLetterTopic != "" && strings.TrimSpace(p.Consumer.DeadLetterTopic) == "":
+		return errors.New("consumer.dead_letter_topic must not be blank")
+	case p.Consumer.DeadLetterTopic != "" && !p.Kafka.Version.IsAtLeast(sarama.V0_11_0_0):
+		return errors.New("consumer.dead_letter_topic requires Kafka 0.11.0 or newer (message headers support)")
 	case p.Consumer.OffsetsCommitInterval <= 0:
 		return errors.New("consumer.offsets_commit_interval must be > 0")
 	case p.Consumer.SubscriptionTimeout <= 0:

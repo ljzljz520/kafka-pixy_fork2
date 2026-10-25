@@ -15,6 +15,13 @@ const (
 	// An event of this type should be sent to the message events channel
 	// when the message is acknowledged by a client.
 	EvAcked
+
+	// An event of this type is sent to the message events channel when a
+	// dead letter copy of a retry-exhausted message gets a production
+	// receipt. A nil `Event.Err` means the copy is durably stored and the
+	// source record can be acknowledged, a non-nil error means failure or an
+	// unknown result, the source gap must be retained and the copy retried.
+	EvDeadLettered
 )
 
 var (
@@ -79,12 +86,16 @@ func NewRequest(group, topic string) Request {
 }
 
 func Ack(offset int64) Event {
-	return Event{EvAcked, offset}
+	return Event{T: EvAcked, Offset: offset}
 }
 
 type Event struct {
 	T      eventType
 	Offset int64
+
+	// Err carries the dead letter production result for EvDeadLettered
+	// events, it is nil on success.
+	Err error
 }
 
 type eventType int

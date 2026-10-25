@@ -10,6 +10,7 @@ import (
 	"github.com/mailgun/kafka-pixy/config"
 	"github.com/mailgun/kafka-pixy/consumer"
 	"github.com/mailgun/kafka-pixy/consumer/consumerimpl"
+	"github.com/mailgun/kafka-pixy/consumer/deadletter"
 	"github.com/mailgun/kafka-pixy/offsetmgr"
 	"github.com/mailgun/kafka-pixy/producer"
 	"github.com/pkg/errors"
@@ -105,7 +106,15 @@ func Spawn(parentActDesc *actor.Descriptor, name string, cfg *config.Proxy) (*T,
 		return nil, errors.Wrap(err, "failed to spawn producer")
 	}
 	if !cfg.Consumer.Disabled {
-		if p.consumer, err = consumerimpl.Spawn(p.actDesc, cfg, p.offsetMgrF); err != nil {
+		var dlqProducer deadletter.Producer
+		if cfg.Consumer.DeadLetterTopic != "" {
+			// The producer is configured with acks=all and
+			// Return.Successes/Return.Errors, therefore a non-error receipt
+			// means the copy was durably acknowledged by the brokers.
+			dlqProducer = dlqProducerAdapter{producer: p.producer}
+		}
+		if p.consumer, err = consumerimpl.Spawn(p.actDesc, cfg, p.offsetMgrF,
+			name, dlqProducer); err != nil {
 			return nil, errors.Wrap(err, "failed to spawn consumer")
 		}
 	}
@@ -352,4 +361,34 @@ func (p *T) GetTopicMetadata(topic string, withPartitions, withConfig bool) (adm
 		return admin.TopicMetadata{}, ErrUnavailable
 	}
 	return p.admin.GetTopicMetadata(topic, withPartitions, withConfig)
+}
+
+// dlqProducerAdapter adapts the internal producer response channel to the
+// deadletter.Producer interface. Every producer response is translated into
+// exactly one receipt; a missing producer response (e.g. a message dropped
+// during producer shutdown) surfaces as a lost receipt on the consumer side,
+// which keeps the source gap and retries.
+type dlqProducerAdapter struct {
+	producer *producer.T
+}
+
+// implements `deadletter.Producer`.
+func (a dlqProducerAdapter) AsyncProduce(topic string, key, value sarama.Encoder,
+	headers []sarama.RecordHeader,
+) <-chan deadletter.Receipt {
+	producerCh := a.producer.AsyncProduce(topic, key, value, headers)
+	receiptCh := make(chan deadletter.Receipt, 1)
+	go func() {
+		rs, ok := <-producerCh
+		if !ok {
+			return
+		}
+		receipt := deadletter.Receipt{Err: rs.Err}
+		if rs.Msg != nil {
+			receipt.Partition = rs.Msg.Partition
+			receipt.Offset = rs.Msg.Offset
+		}
+		receiptCh <- receipt
+	}()
+	return receiptCh
 }

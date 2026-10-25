@@ -1,9 +1,11 @@
 package service
 
 import (
+	"bytes"
 	"context"
 	"fmt"
 	"math/rand"
+	"strconv"
 	"sync"
 	"time"
 
@@ -11,6 +13,7 @@ import (
 
 	"github.com/Shopify/sarama"
 	"github.com/mailgun/kafka-pixy/config"
+	"github.com/mailgun/kafka-pixy/consumer/deadletter"
 	pb "github.com/mailgun/kafka-pixy/gen/golang"
 	"github.com/mailgun/kafka-pixy/testhelpers"
 	"github.com/mailgun/kafka-pixy/testhelpers/kafkahelper"
@@ -706,6 +709,274 @@ func (s *ServiceGRPCSuite) TestConsumeMissingTopic(c *C) {
 	// Cleanup
 	cancel()
 	wg.Wait()
+}
+
+// Retry-exhausted messages (no explicit acknowledgement) are copied to the
+// configured dead letter topic and the source group offset advances only
+// after the copies are durably stored. The test uses a real Kafka cluster to
+// verify binary payload fidelity, duplicate header preservation and the
+// envelope metadata.
+func (s *ServiceGRPCSuite) TestConsumeDeadLetter(c *C) {
+	// Dead lettering requires message headers (Kafka >= 0.11).
+	s.proxyCfg.Kafka.Version.Set(sarama.V0_11_0_0)
+	s.proxyCfg.Consumer.AckTimeout = 400 * time.Millisecond
+	s.proxyCfg.Consumer.RetryBackoff = 200 * time.Millisecond
+	s.proxyCfg.Consumer.MaxRetries = 0
+
+	suffix := strconv.FormatInt(time.Now().UnixNano(), 36)
+	srcTopic := "test.dlq.src." + suffix
+	dlqTopic := "test.dlq.out." + suffix
+	group := "dlq-group-" + suffix
+	const cluster = "pxyG"
+	s.proxyCfg.Consumer.DeadLetterTopic = dlqTopic
+
+	// A modern client is used to create topics, produce binary source
+	// records and read the dead letter copies back directly from Kafka.
+	cliCfg := testhelpers.NewTestProxyCfg("dlq_it_cli").SaramaClientCfg()
+	cliCfg.Version = sarama.V0_11_0_0
+	cliCfg.Producer.RequiredAcks = sarama.WaitForAll
+	cliCfg.Producer.Return.Successes = true
+	cliCfg.Producer.Flush.Messages = 1
+
+	adm, err := sarama.NewClusterAdmin(testhelpers.KafkaPeers, cliCfg)
+	c.Assert(err, IsNil)
+	createTestTopic(c, adm, srcTopic)
+	createTestTopic(c, adm, dlqTopic)
+	_ = adm.Close()
+
+	cli, err := sarama.NewClient(testhelpers.KafkaPeers, cliCfg)
+	c.Assert(err, IsNil)
+	defer cli.Close()
+	waitForTopic(c, cli, srcTopic)
+	waitForTopic(c, cli, dlqTopic)
+
+	// Three source records with binary key/value and duplicate headers.
+	specs := []struct {
+		key     []byte
+		value   []byte
+		headers []sarama.RecordHeader
+	}{
+		{
+			key:   []byte{0x00, 0x01, 0xFF},
+			value: []byte{'v', 0x00, 0xFF},
+			headers: []sarama.RecordHeader{
+				{Key: []byte("dup"), Value: []byte("one")},
+				{Key: []byte("dup"), Value: []byte("two")},
+				{Key: []byte("x-bin"), Value: []byte("bin\x00\xff")},
+			},
+		},
+		{
+			key:   []byte{0x00, 0x02, 0xFF},
+			value: []byte{'w', 0x00, 0xFE},
+			headers: []sarama.RecordHeader{
+				{Key: []byte("dup"), Value: []byte("one")},
+				{Key: []byte("dup"), Value: []byte("two")},
+				{Key: []byte("x-bin"), Value: []byte("bin\x00\xff")},
+			},
+		},
+		{
+			key:   []byte{0x00, 0x03, 0xFF},
+			value: []byte{'x', 0x00, 0xFD},
+			headers: []sarama.RecordHeader{
+				{Key: []byte("dup"), Value: []byte("one")},
+				{Key: []byte("dup"), Value: []byte("two")},
+				{Key: []byte("x-bin"), Value: []byte("bin\x00\xff")},
+			},
+		},
+	}
+	prod, err := sarama.NewSyncProducerFromClient(cli)
+	c.Assert(err, IsNil)
+	srcOffsets := make([]int64, len(specs))
+	for i, spec := range specs {
+		pm := &sarama.ProducerMessage{
+			Topic:     srcTopic,
+			Partition: 0,
+			Key:       sarama.ByteEncoder(spec.key),
+			Value:     sarama.ByteEncoder(spec.value),
+			Headers:   spec.headers,
+		}
+		part, offset, err := prod.SendMessage(pm)
+		c.Assert(err, IsNil)
+		c.Assert(part, Equals, int32(0))
+		srcOffsets[i] = offset
+	}
+	begin := srcOffsets[0]
+	c.Assert(srcOffsets, DeepEquals, []int64{begin, begin + 1, begin + 2})
+	c.Assert(prod.Close(), IsNil)
+
+	// Point the source group exactly at the first test record.
+	s.kh.SetOffsetValues(group, srcTopic, []int64{begin})
+
+	svc, err := Spawn(s.cfg)
+	c.Assert(err, IsNil)
+	s.waitSvcUp(c, 5*time.Second)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+	defer cancel()
+
+	// Consume all three records without ever acknowledging them: they exhaust
+	// consumer.max_retries=0 and must be dead lettered.
+	for i, offset := range srcOffsets {
+		res, err := s.clt.ConsumeNAck(ctx, &pb.ConsNAckRq{
+			Cluster: cluster,
+			Topic:   srcTopic,
+			Group:   group,
+			NoAck:   true,
+		})
+		c.Assert(err, IsNil, Commentf("failed to consume message #%d", i))
+		c.Assert(res.Partition, Equals, int32(0))
+		c.Assert(res.Offset, Equals, offset)
+	}
+
+	// Before the copies exist the source group offset must not cross the
+	// exhausted records: it stays at the first offset while retries expire.
+	getSrcOffset := func() int64 {
+		res, err := s.clt.GetOffsets(ctx, &pb.GetOffsetsRq{Topic: srcTopic, Group: group})
+		c.Assert(err, IsNil)
+		return res.Offsets[0].Offset
+	}
+	preDeadline := time.Now().Add(250 * time.Millisecond)
+	for time.Now().Before(preDeadline) {
+		c.Assert(getSrcOffset(), Equals, begin,
+			Commentf("source offset advanced before any dead letter copy landed"))
+		time.Sleep(40 * time.Millisecond)
+	}
+
+	// Read the dead letter copies directly from the quarantine topic.
+	kafkaCons, err := sarama.NewConsumerFromClient(cli)
+	c.Assert(err, IsNil)
+	defer kafkaCons.Close()
+	dlqPC, err := kafkaCons.ConsumePartition(dlqTopic, 0, sarama.OffsetOldest)
+	c.Assert(err, IsNil)
+	defer dlqPC.Close()
+
+	copies := make(map[int64]*sarama.ConsumerMessage)
+	dlqDeadline := time.After(20 * time.Second)
+	for len(copies) < len(specs) {
+		select {
+		case cm := <-dlqPC.Messages():
+			srcOffset, perr := strconv.ParseInt(headerValue(cm.Headers, deadletter.HeaderSourceOffset), 10, 64)
+			c.Assert(perr, IsNil)
+			_, duplicated := copies[srcOffset]
+			c.Assert(duplicated, Equals, false, Commentf("duplicate copy for source offset %d", srcOffset))
+			copies[srcOffset] = cm
+		case <-dlqDeadline:
+			c.Fatalf("got %d of %d dead letter copies", len(copies), len(specs))
+		}
+	}
+
+	// Verify each copy: binary payload fidelity, duplicate original headers
+	// and full envelope metadata with a source-location stable identity.
+	for i, spec := range specs {
+		srcOffset := srcOffsets[i]
+		cm := copies[srcOffset]
+		c.Assert(cm.Key, DeepEquals, spec.key, Commentf("source offset %d", srcOffset))
+		c.Assert(cm.Value, DeepEquals, spec.value, Commentf("source offset %d", srcOffset))
+
+		orig := originalHeaders(cm.Headers)
+		c.Assert(orig, HasLen, 3)
+		c.Assert(string(orig[0].Key), Equals, "dup")
+		c.Assert(string(orig[0].Value), Equals, "one")
+		c.Assert(string(orig[1].Key), Equals, "dup")
+		c.Assert(string(orig[1].Value), Equals, "two")
+		c.Assert(string(orig[2].Key), Equals, "x-bin")
+		c.Assert(orig[2].Value, DeepEquals, []byte("bin\x00\xff"))
+
+		c.Assert(headerValue(cm.Headers, deadletter.HeaderVersion), Equals, "1")
+		c.Assert(headerValue(cm.Headers, deadletter.HeaderIdentity), Equals,
+			deadletter.StableIdentity(cluster, group, srcTopic, 0, srcOffset))
+		c.Assert(headerValue(cm.Headers, deadletter.HeaderSourceCluster), Equals, cluster)
+		c.Assert(headerValue(cm.Headers, deadletter.HeaderSourceGroup), Equals, group)
+		c.Assert(headerValue(cm.Headers, deadletter.HeaderSourceTopic), Equals, srcTopic)
+		c.Assert(headerValue(cm.Headers, deadletter.HeaderSourcePartition), Equals, "0")
+		c.Assert(headerValue(cm.Headers, deadletter.HeaderSourceOffset),
+			Equals, strconv.FormatInt(srcOffset, 10))
+		c.Assert(headerValue(cm.Headers, deadletter.HeaderRetryNo), Equals, "1")
+		ts, terr := strconv.ParseInt(headerValue(cm.Headers, deadletter.HeaderSourceTimestamp), 10, 64)
+		c.Assert(terr, IsNil)
+		c.Assert(ts > 0, Equals, true)
+		exh, eerr := strconv.ParseInt(headerValue(cm.Headers, deadletter.HeaderExhaustedAt), 10, 64)
+		c.Assert(eerr, IsNil)
+		c.Assert(exh > 0, Equals, true)
+	}
+
+	// Only after every copy landed does the source group advance, in order,
+	// to the end of the exhausted range.
+	advanceDeadline := time.Now().Add(15 * time.Second)
+	for time.Now().Before(advanceDeadline) {
+		if getSrcOffset() == begin+int64(len(specs)) {
+			break
+		}
+		time.Sleep(50 * time.Millisecond)
+	}
+	c.Assert(getSrcOffset(), Equals, begin+int64(len(specs)))
+	res, err := s.clt.GetOffsets(ctx, &pb.GetOffsetsRq{Topic: srcTopic, Group: group})
+	c.Assert(err, IsNil)
+	c.Assert(res.Offsets[0].Lag, Equals, int64(0))
+	c.Assert(res.Offsets[0].SparseAcks, Equals, "")
+	svc.Stop()
+
+	// A new owner starting after the source commit has nothing to re-copy:
+	// restart and wait past the ack timeout, the quarantine topic must not
+	// gain any duplicate identity.
+	svc2, err := Spawn(s.cfg)
+	c.Assert(err, IsNil)
+	s.waitSvcUp(c, 5*time.Second)
+	time.Sleep(900 * time.Millisecond)
+	newest, err := cli.GetOffset(dlqTopic, 0, sarama.OffsetNewest)
+	c.Assert(err, IsNil)
+	c.Assert(newest, Equals, int64(len(specs)),
+		Commentf("dead letter topic gained copies after the source offset was committed"))
+	svc2.Stop()
+}
+
+func createTestTopic(c *C, adm sarama.ClusterAdmin, topic string) {
+	err := adm.CreateTopic(topic, &sarama.TopicDetail{
+		NumPartitions:     1,
+		ReplicationFactor: 1,
+	}, false)
+	if err != nil {
+		// Tolerate a topic left behind by a previous aborted run.
+		c.Log(err)
+	}
+}
+
+func waitForTopic(c *C, cli sarama.Client, topic string) {
+	deadline := time.Now().Add(15 * time.Second)
+	for {
+		partitions, err := cli.Partitions(topic)
+		if err == nil && len(partitions) == 1 {
+			if leader, lerr := cli.Leader(topic, 0); lerr == nil && leader != nil {
+				return
+			}
+		}
+		if time.Now().After(deadline) {
+			c.Fatalf("topic %s did not become ready: %v", topic, err)
+		}
+		_ = cli.RefreshMetadata(topic)
+		time.Sleep(100 * time.Millisecond)
+	}
+}
+
+func headerValue(headers []*sarama.RecordHeader, name string) string {
+	for _, h := range headers {
+		if string(h.Key) == name {
+			return string(h.Value)
+		}
+	}
+	return ""
+}
+
+// originalHeaders returns headers that are not dead letter envelope metadata,
+// preserving their order and duplicates.
+func originalHeaders(headers []*sarama.RecordHeader) []*sarama.RecordHeader {
+	var out []*sarama.RecordHeader
+	for _, h := range headers {
+		if !bytes.HasPrefix(h.Key, []byte(deadletter.HeaderPrefix)) {
+			out = append(out, h)
+		}
+	}
+	return out
 }
 
 func (s *ServiceGRPCSuite) waitSvcUp(c *C, timeout time.Duration) {

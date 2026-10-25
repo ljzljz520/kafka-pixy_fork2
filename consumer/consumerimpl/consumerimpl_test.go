@@ -66,7 +66,7 @@ func (s *ConsumerSuite) TestInitialOffsetTooLarge(c *C) {
 	om.SubmitOffset(offsetmgr.Offset{Val: newestOffsets[0] + 3, Meta: ""})
 	om.Stop()
 
-	cons, err := Spawn(s.ns, s.cfg, s.omf)
+	cons, err := Spawn(s.ns, s.cfg, s.omf, "test", nil)
 	c.Assert(err, IsNil)
 	defer cons.Stop()
 
@@ -89,7 +89,7 @@ func (s *ConsumerSuite) TestSinglePartitionTopic(c *C) {
 	s.kh.ResetOffsets("g1", "test.1")
 	produced := s.kh.PutMessages("single", "test.1", map[string]int{"": 3})
 
-	cons, err := Spawn(s.ns, s.cfg, s.omf)
+	cons, err := Spawn(s.ns, s.cfg, s.omf, "test", nil)
 	c.Assert(err, IsNil)
 	defer cons.Stop()
 
@@ -105,7 +105,7 @@ func (s *ConsumerSuite) TestSequentialConsume(c *C) {
 	s.kh.ResetOffsets("g1", "test.1")
 	produced := s.kh.PutMessages("sequencial", "test.1", map[string]int{"": 3})
 
-	cons, err := Spawn(s.ns, s.cfg, s.omf)
+	cons, err := Spawn(s.ns, s.cfg, s.omf, "test", nil)
 	c.Assert(err, IsNil)
 	log.Infof("*** GIVEN 1")
 	consumed := consume(c, cons, "g1", "test.1", 2, 5*time.Second)
@@ -115,7 +115,7 @@ func (s *ConsumerSuite) TestSequentialConsume(c *C) {
 	// When: one consumer stopped and another one takes its place.
 	log.Infof("*** WHEN")
 	cons.Stop()
-	cons, err = Spawn(s.ns, s.cfg, s.omf)
+	cons, err = Spawn(s.ns, s.cfg, s.omf, "test", nil)
 	c.Assert(err, IsNil)
 	defer cons.Stop()
 
@@ -133,7 +133,7 @@ func (s *ConsumerSuite) TestMultiplePartitions(c *C) {
 	s.kh.PutMessages("multiple.partitions", "test.4", map[string]int{"A": 100, "B": 100})
 
 	log.Infof("*** GIVEN 1")
-	cons, err := Spawn(s.ns, s.cfg, s.omf)
+	cons, err := Spawn(s.ns, s.cfg, s.omf, "test", nil)
 	c.Assert(err, IsNil)
 	defer cons.Stop()
 
@@ -147,7 +147,7 @@ func (s *ConsumerSuite) TestMultiplePartitions(c *C) {
 
 	// Then: we have events consumed from both partitions more or less evenly.
 	log.Infof("*** THEN")
-	if len(consumed["A"]) == 0 || len(consumed["A"]) == 0 {
+	if len(consumed["A"]) == 0 || len(consumed["B"]) == 0 {
 		c.Errorf("Not distributed: consumed[A]=%d, consumed[B]=%d", len(consumed["A"]), len(consumed["B"]))
 	}
 }
@@ -161,7 +161,7 @@ func (s *ConsumerSuite) TestMultipleTopics(c *C) {
 	produced4 := s.kh.PutMessages("multiple.topics", "test.4", map[string]int{"B": 1, "C": 1})
 
 	log.Infof("*** GIVEN 1")
-	cons, err := Spawn(s.ns, s.cfg, s.omf)
+	cons, err := Spawn(s.ns, s.cfg, s.omf, "test", nil)
 	c.Assert(err, IsNil)
 	defer cons.Stop()
 
@@ -187,7 +187,7 @@ func (s *ConsumerSuite) TestMultipleGroups(c *C) {
 	s.kh.PutMessages("multi", "test.4", map[string]int{"A": 10, "B": 10, "C": 10})
 
 	log.Infof("*** GIVEN 1")
-	cons, err := Spawn(s.ns, s.cfg, s.omf)
+	cons, err := Spawn(s.ns, s.cfg, s.omf, "test", nil)
 	c.Assert(err, IsNil)
 	defer cons.Stop()
 
@@ -210,7 +210,7 @@ func (s *ConsumerSuite) TestTooFewPartitions(c *C) {
 	s.kh.ResetOffsets("g1", "test.1")
 	produced := s.kh.PutMessages("few", "test.1", map[string]int{"": 3})
 
-	cons, err := Spawn(s.ns, s.cfg, s.omf)
+	cons, err := Spawn(s.ns, s.cfg, s.omf, "test", nil)
 	c.Assert(err, IsNil)
 	defer cons.Stop()
 	log.Infof("*** GIVEN 1")
@@ -223,7 +223,7 @@ func (s *ConsumerSuite) TestTooFewPartitions(c *C) {
 	cfg1 := testhelpers.NewTestProxyCfg("c2")
 	omf1 := offsetmgr.SpawnFactory(s.ns, cfg1, s.kh.KafkaClt())
 	defer omf1.Stop()
-	cons1, err := Spawn(s.ns, cfg1, omf1)
+	cons1, err := Spawn(s.ns, cfg1, omf1, "test", nil)
 	c.Assert(err, IsNil)
 	defer cons1.Stop()
 	_, err = cons1.Consume("g1", "test.1")
@@ -243,7 +243,7 @@ func (s *ConsumerSuite) TestRebalanceOnJoin(c *C) {
 	s.kh.ResetOffsets("g1", "test.4")
 	s.kh.PutMessages("join", "test.4", map[string]int{"A": 10, "B": 10})
 
-	cons, err := Spawn(s.ns, s.cfg, s.omf)
+	cons, err := Spawn(s.ns, s.cfg, s.omf, "test", nil)
 	c.Assert(err, IsNil)
 	defer cons.Stop()
 
@@ -267,7 +267,7 @@ func (s *ConsumerSuite) TestRebalanceOnJoin(c *C) {
 	cfg1 := testhelpers.NewTestProxyCfg("c2")
 	omf1 := offsetmgr.SpawnFactory(s.ns, cfg1, s.kh.KafkaClt())
 	defer omf1.Stop()
-	cons1, err := Spawn(s.ns, cfg1, omf1)
+	cons1, err := Spawn(s.ns, cfg1, omf1, "test", nil)
 	c.Assert(err, IsNil)
 	defer cons1.Stop()
 
@@ -300,7 +300,7 @@ func (s *ConsumerSuite) TestRebalanceOnLeave(c *C) {
 		cfg := testhelpers.NewTestProxyCfg(fmt.Sprintf("c%d", i))
 		omf := offsetmgr.SpawnFactory(s.ns, cfg, s.kh.KafkaClt())
 		defer omf.Stop()
-		consumers[i], err = Spawn(s.ns, cfg, omf)
+		consumers[i], err = Spawn(s.ns, cfg, omf, "test", nil)
 		c.Assert(err, IsNil)
 	}
 	defer consumers[0].Stop()
@@ -376,7 +376,7 @@ func (s *ConsumerSuite) TestRebalanceOnTimeout(c *C) {
 	s.kh.ResetOffsets("g1", "test.4")
 	s.kh.PutMessages("timeout", "test.4", map[string]int{"A": 10, "B": 10})
 
-	cons, err := Spawn(s.ns, s.cfg, s.omf)
+	cons, err := Spawn(s.ns, s.cfg, s.omf, "test", nil)
 	c.Assert(err, IsNil)
 	defer cons.Stop()
 
@@ -384,7 +384,7 @@ func (s *ConsumerSuite) TestRebalanceOnTimeout(c *C) {
 	cfg1.Consumer.SubscriptionTimeout = 500 * time.Millisecond
 	omf1 := offsetmgr.SpawnFactory(s.ns, cfg1, s.kh.KafkaClt())
 	defer omf1.Stop()
-	sc1, err := Spawn(s.ns, cfg1, omf1)
+	sc1, err := Spawn(s.ns, cfg1, omf1, "test", nil)
 	c.Assert(err, IsNil)
 	defer sc1.Stop()
 
@@ -446,7 +446,7 @@ func (s *ConsumerSuite) TestTooManyRequestsError(c *C) {
 	s.kh.PutMessages("join", "test.1", map[string]int{"A": 30})
 
 	s.cfg.Consumer.ChannelBufferSize = 1
-	cons, err := Spawn(s.ns, s.cfg, s.omf)
+	cons, err := Spawn(s.ns, s.cfg, s.omf, "test", nil)
 	c.Assert(err, IsNil)
 	defer cons.Stop()
 
@@ -477,7 +477,7 @@ func (s *ConsumerSuite) TestTooManyRequestsError(c *C) {
 func (s *ConsumerSuite) TestInvalidTopic(c *C) {
 	// Given
 	s.cfg.Consumer.LongPollingTimeout = 1 * time.Second
-	cons, err := Spawn(s.ns, s.cfg, s.omf)
+	cons, err := Spawn(s.ns, s.cfg, s.omf, "test", nil)
 	c.Assert(err, IsNil)
 	defer cons.Stop()
 
@@ -493,7 +493,7 @@ func (s *ConsumerSuite) TestLotsOfPartitions(c *C) {
 	// Given
 	s.kh.ResetOffsets("g1", "test.64")
 
-	cons, err := Spawn(s.ns, s.cfg, s.omf)
+	cons, err := Spawn(s.ns, s.cfg, s.omf, "test", nil)
 	c.Assert(err, IsNil)
 	defer cons.Stop()
 
@@ -521,7 +521,7 @@ func (s *ConsumerSuite) TestNewGroup(c *C) {
 	s.kh.PutMessages("rand", "test.1", map[string]int{"A1": 1})
 
 	group := fmt.Sprintf("g%d", time.Now().Unix())
-	cons, err := Spawn(s.ns, s.cfg, s.omf)
+	cons, err := Spawn(s.ns, s.cfg, s.omf, "test", nil)
 	c.Assert(err, IsNil)
 
 	// The very first consumption of a group is terminated by timeout because
@@ -535,7 +535,7 @@ func (s *ConsumerSuite) TestNewGroup(c *C) {
 	// Then: message produced after that will be consumed by the new consumer
 	// instance from the same group.
 	produced := s.kh.PutMessages("rand", "test.1", map[string]int{"A2": 1})
-	cons, err = Spawn(s.ns, s.cfg, s.omf)
+	cons, err = Spawn(s.ns, s.cfg, s.omf, "test", nil)
 	c.Assert(err, IsNil)
 	defer cons.Stop()
 	msg, err = cons.Consume(group, "test.1")
@@ -555,7 +555,7 @@ func (s *ConsumerSuite) TestTopicTimeout(c *C) {
 
 	s.cfg.Consumer.LongPollingTimeout = 3000 * time.Millisecond
 	s.cfg.Consumer.SubscriptionTimeout = 10000 * time.Millisecond
-	cons, err := Spawn(s.ns, s.cfg, s.omf)
+	cons, err := Spawn(s.ns, s.cfg, s.omf, "test", nil)
 	c.Assert(err, IsNil)
 	defer cons.Stop()
 
@@ -564,7 +564,7 @@ func (s *ConsumerSuite) TestTopicTimeout(c *C) {
 	cfg1.Consumer.SubscriptionTimeout = 10000 * time.Millisecond
 	omf1 := offsetmgr.SpawnFactory(s.ns, cfg1, s.kh.KafkaClt())
 	defer omf1.Stop()
-	cons1, err := Spawn(s.ns, cfg1, omf1)
+	cons1, err := Spawn(s.ns, cfg1, omf1, "test", nil)
 	c.Assert(err, IsNil)
 	defer cons1.Stop()
 
@@ -612,14 +612,14 @@ func (s *ConsumerSuite) TestTopicAndAckTimeouts(c *C) {
 	s.cfg.Consumer.LongPollingTimeout = 1000 * time.Millisecond
 	s.cfg.Consumer.SubscriptionTimeout = 2000 * time.Millisecond
 	s.cfg.Consumer.AckTimeout = 5000 * time.Millisecond
-	cons, err := Spawn(s.ns, s.cfg, s.omf)
+	cons, err := Spawn(s.ns, s.cfg, s.omf, "test", nil)
 	c.Assert(err, IsNil)
 	defer cons.Stop()
 
 	cfg1 := testhelpers.NewTestProxyCfg("c2")
 	omf1 := offsetmgr.SpawnFactory(s.ns, cfg1, s.kh.KafkaClt())
 	defer omf1.Stop()
-	cons1, err := Spawn(s.ns, cfg1, omf1)
+	cons1, err := Spawn(s.ns, cfg1, omf1, "test", nil)
 	c.Assert(err, IsNil)
 	defer cons1.Stop()
 
@@ -648,7 +648,7 @@ func (s *ConsumerSuite) TestTopicExpireOnAck(c *C) {
 	s.cfg.Consumer.LongPollingTimeout = 1000 * time.Millisecond
 	s.cfg.Consumer.SubscriptionTimeout = 1500 * time.Millisecond
 	s.cfg.Consumer.AckTimeout = 42000 * time.Millisecond
-	cons, err := Spawn(s.ns, s.cfg, s.omf)
+	cons, err := Spawn(s.ns, s.cfg, s.omf, "test", nil)
 	c.Assert(err, IsNil)
 	defer cons.Stop()
 
@@ -656,7 +656,7 @@ func (s *ConsumerSuite) TestTopicExpireOnAck(c *C) {
 	cfg1.Consumer.LongPollingTimeout = 2000 * time.Millisecond
 	omf1 := offsetmgr.SpawnFactory(s.ns, cfg1, s.kh.KafkaClt())
 	defer omf1.Stop()
-	cons1, err := Spawn(s.ns, cfg1, omf1)
+	cons1, err := Spawn(s.ns, cfg1, omf1, "test", nil)
 	c.Assert(err, IsNil)
 	defer cons1.Stop()
 

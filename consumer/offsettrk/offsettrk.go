@@ -157,6 +157,44 @@ func (ot *T) IsAcked(offset int64) (bool, int64) {
 	return false, offset + 1
 }
 
+// ExhaustedOffer describes an offered message that has used up all of its
+// retry attempts and therefore must be disposed of (e.g. dead lettered)
+// before it can be acknowledged.
+type ExhaustedOffer struct {
+	Msg     consumer.Message
+	RetryNo int
+}
+
+// MarkExhausted marks the offer at the specified offset as retry-exhausted.
+// An exhausted offer is no longer returned by NextRetry and is not offered to
+// clients again, but it stays tracked (and therefore keeps a gap in the
+// committed offset range) until it is acknowledged or dropped. The function
+// does nothing if there is no such offer.
+func (ot *T) MarkExhausted(offset int64) {
+	i := sort.Search(len(ot.offers), func(i int) bool {
+		return ot.offers[i].msg.Offset >= offset
+	})
+	if i >= len(ot.offers) || ot.offers[i].msg.Offset != offset {
+		return
+	}
+	ot.offers[i].exhausted = true
+}
+
+// ExhaustedOffers returns offers marked as retry-exhausted in ascending
+// offset order.
+func (ot *T) ExhaustedOffers() []ExhaustedOffer {
+	var exhausted []ExhaustedOffer
+	for i := range ot.offers {
+		if ot.offers[i].exhausted {
+			exhausted = append(exhausted, ExhaustedOffer{
+				Msg:     ot.offers[i].msg,
+				RetryNo: ot.offers[i].retryNo,
+			})
+		}
+	}
+	return exhausted
+}
+
 // NextRetry returns a next message to be retried along with the retry attempt
 // number. If there are no messages to be retried then nil is returned.
 func (ot *T) NextRetry() (consumer.Message, int, bool) {
@@ -165,6 +203,12 @@ func (ot *T) NextRetry() (consumer.Message, int, bool) {
 func (ot *T) nextRetry(now time.Time) (consumer.Message, int, bool) {
 	for i := range ot.offers {
 		o := &ot.offers[i]
+		// Exhausted offers await terminal disposal (e.g. a dead letter
+		// receipt), they must neither be re-offered nor have their deadline
+		// bumped.
+		if o.exhausted {
+			continue
+		}
 		if o.deadline.Before(now) {
 			o.deadline = now.Add(ot.offerTimeout)
 			o.retryNo += 1
@@ -212,7 +256,12 @@ func (ot *T) shouldWait4Ack(now time.Time) time.Duration {
 }
 
 func (ot *T) newOffer(msg consumer.Message) offer {
-	return offer{msg, msg.Offset, 0, time.Now().Add(ot.offerTimeout)}
+	return offer{
+		msg:      msg,
+		offset:   msg.Offset,
+		retryNo:  0,
+		deadline: time.Now().Add(ot.offerTimeout),
+	}
 }
 
 // removeOffer if there is an offer with the specified offset in the list, then
@@ -412,8 +461,9 @@ func decodeInt64(buf []byte) (int64, []byte, error) {
 }
 
 type offer struct {
-	msg      consumer.Message
-	offset   int64
-	retryNo  int
-	deadline time.Time
+	msg       consumer.Message
+	offset    int64
+	retryNo   int
+	deadline  time.Time
+	exhausted bool
 }
